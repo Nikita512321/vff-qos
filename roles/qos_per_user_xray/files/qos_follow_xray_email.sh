@@ -132,16 +132,16 @@ ensure_tc_for_mark() {
 }
 
 update_conntrack_mark() {
-  local ip="$1" port="$2" mark_dec="$3"
+  local proto="$1" ip="$2" port="$3" mark_dec="$4"
 
   local cmd
-  cmd="conntrack -U -p tcp --orig-src ${ip} --orig-dst ${SERVER_IP} --orig-port-src ${port} --orig-port-dst ${VPN_PORT} --mark ${mark_dec}"
+  cmd="conntrack -U -p ${proto} --orig-src ${ip} --orig-dst ${SERVER_IP} --orig-port-src ${port} --orig-port-dst ${VPN_PORT} --mark ${mark_dec}"
 
   log "  [CT] $cmd"
   run "$cmd" || true
 
   if [[ "$DRY_RUN" == "0" ]]; then
-    conntrack -L -p tcp 2>/dev/null \
+    conntrack -L -p "$proto" 2>/dev/null \
       | grep -F "src=${ip} " \
       | grep -F "sport=${port} " \
       | grep -F "dport=${VPN_PORT} " \
@@ -177,16 +177,17 @@ stream_xray_log \
 | while IFS= read -r line; do
     [[ "$line" == *" accepted "* && "$line" == *" email:"* && "$line" == *" from "* ]] || continue
 
-    if [[ "$line" =~ from[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)[[:space:]].*email:[[:space:]]([^[:space:]]+) ]]; then
+    if [[ "$line" =~ from[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)[[:space:]].*accepted[[:space:]](tcp|udp):.*email:[[:space:]]([^[:space:]]+) ]]; then
       ip="${BASH_REMATCH[1]}"
       port="${BASH_REMATCH[2]}"
-      email="${BASH_REMATCH[3]}"
+      proto="${BASH_REMATCH[3]}"
+      email="${BASH_REMATCH[4]}"
 
       read -r ul dl < <(get_rates_for_email "$email")
       mark="$(email_to_mark "$email")"
 
-      log "event: email=$email ip=$ip:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
+      log "event: proto=$proto email=$email ip=$ip:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
       ensure_tc_for_mark "$mark" "$ul" "$dl"
-      update_conntrack_mark "$ip" "$port" "$mark"
+      update_conntrack_mark "$proto" "$ip" "$port" "$mark"
     fi
   done
