@@ -1,7 +1,7 @@
 [Unit]
 Description=VFF per-user QoS follow Xray access log (conntrack mark + tc)
 Wants=network-online.target
-After=network-online.target docker.service qos-bootstrap.service
+After=network-online.target qos-bootstrap.service{% if qos_log_source == 'docker' %} docker.service{% elif qos_xray_systemd_unit | default('') | length > 0 %} {{ qos_xray_systemd_unit }}{% endif %}
 Requires=qos-bootstrap.service
 
 [Service]

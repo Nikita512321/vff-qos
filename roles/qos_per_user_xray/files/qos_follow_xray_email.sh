@@ -8,6 +8,7 @@ ENV_FILE="${ENV_FILE:-/etc/vff-qos/qos.env}"
 
 CONTAINER="${CONTAINER:-remnanode}"
 XRAY_LOG="${XRAY_LOG:-/var/log/supervisor/xray.out.log}"
+LOG_SOURCE="${LOG_SOURCE:-docker}" # docker | host
 
 WAN_DEV="${WAN_DEV:-auto}"
 IFB_DEV="${IFB_DEV:-ifb0}"
@@ -157,7 +158,22 @@ until ensure_bootstrap_ready; do
   sleep 2
 done
 
-docker exec -i "$CONTAINER" sh -lc "tail -n0 -F '$XRAY_LOG'" \
+stream_xray_log() {
+  case "$LOG_SOURCE" in
+    docker)
+      docker exec -i "$CONTAINER" sh -lc "tail -n0 -F '$XRAY_LOG'"
+      ;;
+    host)
+      tail -n0 -F "$XRAY_LOG"
+      ;;
+    *)
+      log "ERROR: unsupported LOG_SOURCE='$LOG_SOURCE' (expected: docker|host)"
+      return 1
+      ;;
+  esac
+}
+
+stream_xray_log \
 | while IFS= read -r line; do
     [[ "$line" == *" accepted "* && "$line" == *" email:"* && "$line" == *" from "* ]] || continue
 

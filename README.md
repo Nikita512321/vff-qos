@@ -194,12 +194,20 @@ qos_state: present        # present | disabled | absent
 qos_if_wan: auto
 qos_if_ifb: ifb0
 
+qos_log_source: host
+# qos_xray_systemd_unit: xray.service
 qos_container: remnanode
 qos_xray_access_log_path: /var/log/supervisor/xray.out.log
 qos_vpn_port: "443"
 
 qos_upload_default: 1000mbit
 qos_download_default: 1000mbit
+```
+
+Для сценария **3x-ui/Xray через systemd (без Docker)** используйте:
+
+```bash
+make qos LIMIT=<node> EXTRA='-e qos_log_source=host -e qos_xray_access_log_path=/var/log/xray/access.log'
 ```
 
 ---

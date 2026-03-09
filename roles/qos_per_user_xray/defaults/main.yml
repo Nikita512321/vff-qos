@@ -18,8 +18,10 @@ qos_if_wan: "auto"
 qos_if_ifb: "ifb0"
 
 # Xray node context (container + access log)
+qos_log_source: "docker" # docker | host
 qos_container: "remnanode"
 qos_xray_access_log_path: "/var/log/supervisor/xray.out.log"
+qos_xray_systemd_unit: "" # e.g. xray.service (used only when qos_log_source=host)
 
 # Default rates if per-email mapping is not implemented
 qos_upload_default: "50mbit"
