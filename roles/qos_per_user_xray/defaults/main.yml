@@ -37,6 +37,13 @@ qos_vpn_port: "443"
 # Dry-run mode for follow script
 qos_dry_run: "0"
 
+# Runtime cache knobs for qos_follow_xray_email.sh
+# Skip repeated tc ensure for same mark within TTL (seconds)
+qos_tc_ensure_ttl_sec: 60
+# Skip duplicate conntrack updates for same flow key within TTL (seconds)
+qos_ct_cache_tcp_ttl_sec: 0
+qos_ct_cache_udp_ttl_sec: 2
+
 # nftables runtime QoS model (Docker-safe)
 
 # Управляет ли роль nft-правилами для QoS

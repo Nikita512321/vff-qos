@@ -19,6 +19,13 @@ VPN_PORT="${VPN_PORT:-443}"
 
 DRY_RUN="${DRY_RUN:-0}"
 
+# Cache knobs:
+# - TC_ENSURE_TTL_SEC: skip repeated tc ensure for same mark within TTL (effective for noisy clients)
+# - CT_CACHE_TCP_TTL_SEC / CT_CACHE_UDP_TTL_SEC: skip duplicate conntrack updates for same flow key
+TC_ENSURE_TTL_SEC="${TC_ENSURE_TTL_SEC:-60}"
+CT_CACHE_TCP_TTL_SEC="${CT_CACHE_TCP_TTL_SEC:-0}"
+CT_CACHE_UDP_TTL_SEC="${CT_CACHE_UDP_TTL_SEC:-2}"
+
 log(){ echo "[$(date '+%F %T')] $*"; }
 
 detect_wan_if() {
@@ -41,6 +48,40 @@ run(){
     echo "+ $*"
   else
     eval "$@"
+  fi
+}
+
+now_epoch() {
+  date +%s
+}
+
+declare -A tc_ensure_cache_ts
+declare -A ct_cache_ts
+
+should_skip_by_ttl() {
+  local key="$1" ttl="$2" now="$3" cache_name="$4"
+  local last=0
+
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=0
+  (( ttl > 0 )) || return 1
+
+  if [[ "$cache_name" == "tc" ]]; then
+    last="${tc_ensure_cache_ts[$key]:-0}"
+  else
+    last="${ct_cache_ts[$key]:-0}"
+  fi
+
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  (( now - last < ttl )) || return 1
+  return 0
+}
+
+touch_cache() {
+  local key="$1" now="$2" cache_name="$3"
+  if [[ "$cache_name" == "tc" ]]; then
+    tc_ensure_cache_ts["$key"]="$now"
+  else
+    ct_cache_ts["$key"]="$now"
   fi
 }
 
@@ -182,7 +223,16 @@ update_conntrack_mark() {
   fi
 }
 
-log "start: container=$CONTAINER log=$XRAY_LOG WAN_DEV=$WAN_DEV IFB_DEV=$IFB_DEV SERVER_IP=$SERVER_IP SERVER_IP6=${SERVER_IP6:-n/a} VPN_PORT=$VPN_PORT"
+ct_ttl_for_proto() {
+  local proto="$1"
+  if [[ "$proto" == "udp" ]]; then
+    echo "$CT_CACHE_UDP_TTL_SEC"
+  else
+    echo "$CT_CACHE_TCP_TTL_SEC"
+  fi
+}
+
+log "start: container=$CONTAINER log=$XRAY_LOG WAN_DEV=$WAN_DEV IFB_DEV=$IFB_DEV SERVER_IP=$SERVER_IP SERVER_IP6=${SERVER_IP6:-n/a} VPN_PORT=$VPN_PORT tc_ttl=${TC_ENSURE_TTL_SEC}s ct_tcp_ttl=${CT_CACHE_TCP_TTL_SEC}s ct_udp_ttl=${CT_CACHE_UDP_TTL_SEC}s"
 
 # wait until bootstrap is ready (important on boot / restarts)
 until ensure_bootstrap_ready; do
@@ -234,13 +284,35 @@ stream_xray_log \
     if [[ -n "$ip" && -n "$port" && -n "$proto" && -n "$email" ]]; then
       read -r ul dl < <(get_rates_for_email "$email")
       mark="$(email_to_mark "$email")"
+      now="$(now_epoch)"
 
       if [[ "$ip" == *:* ]]; then
         log "event: proto=$proto email=$email ip=[$ip]:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
       else
         log "event: proto=$proto email=$email ip=$ip:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
       fi
-      ensure_tc_for_mark "$mark" "$ul" "$dl"
-      update_conntrack_mark "$proto" "$ip" "$port" "$mark"
+
+      tc_key="$mark"
+      if should_skip_by_ttl "$tc_key" "$TC_ENSURE_TTL_SEC" "$now" "tc"; then
+        log "  [TC] skip ensure for mark=$(printf '0x%x' "$mark") (ttl=${TC_ENSURE_TTL_SEC}s)"
+      else
+        ensure_tc_for_mark "$mark" "$ul" "$dl"
+        touch_cache "$tc_key" "$now" "tc"
+      fi
+
+      ct_ttl="$(ct_ttl_for_proto "$proto")"
+      # UDP often opens many short-lived ports; cache by src IP + mark to reduce update bursts.
+      # TCP keeps per-flow key (with src port) to preserve marking precision.
+      if [[ "$proto" == "udp" ]]; then
+        ct_key="${proto}|${ip}|${mark}"
+      else
+        ct_key="${proto}|${ip}|${port}|${mark}"
+      fi
+      if should_skip_by_ttl "$ct_key" "$ct_ttl" "$now" "ct"; then
+        log "  [CT] skip conntrack update for flow=$proto/$ip:$port mark=$(printf '0x%x' "$mark") (ttl=${ct_ttl}s)"
+      else
+        update_conntrack_mark "$proto" "$ip" "$port" "$mark"
+        touch_cache "$ct_key" "$now" "ct"
+      fi
     fi
   done
