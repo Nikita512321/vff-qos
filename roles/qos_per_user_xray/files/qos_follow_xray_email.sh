@@ -141,15 +141,13 @@ ensure_tc_for_mark() {
 
   log "  [UL] ensure class $ul_class on $IFB_DEV rate=$ul_rate"
   ensure_class_htb "$IFB_DEV" "2:1" "$ul_class" "$ul_rate"
-  log "  [UL] ensure fw filter handle=$handle -> $ul_class on $IFB_DEV (ip + ipv6)"
-  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref" "ip"
-  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref" "ipv6"
+  log "  [UL] ensure fw filter handle=$handle -> $ul_class on $IFB_DEV (all)"
+  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref" "all"
 
   log "  [DL] ensure class $dl_class on $WAN_DEV rate=$dl_rate"
   ensure_class_htb "$WAN_DEV" "1:1" "$dl_class" "$dl_rate"
-  log "  [DL] ensure fw filter handle=$handle -> $dl_class on $WAN_DEV (ip + ipv6)"
-  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref" "ip"
-  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref" "ipv6"
+  log "  [DL] ensure fw filter handle=$handle -> $dl_class on $WAN_DEV (all)"
+  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref" "all"
 }
 
 update_conntrack_mark() {
