@@ -26,6 +26,16 @@ detect_wan_if() {
     | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'
 }
 
+detect_server_ip4() {
+  ip -4 route get 1.1.1.1 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+
+detect_server_ip6() {
+  ip -6 route get 2606:4700:4700::1111 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'
+}
+
 run(){
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "+ $*"
@@ -43,10 +53,11 @@ if [[ -z "${WAN_DEV:-}" ]]; then
   exit 1
 fi
 
-# Determine server IP (dst of incoming)
-SERVER_IP="${SERVER_IP:-$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')}"
-if [[ -z "${SERVER_IP:-}" ]]; then
-  log "ERROR: cannot determine SERVER_IP (set SERVER_IP=... manually)"
+# Determine server IPs (dst of incoming)
+SERVER_IP="${SERVER_IP:-$(detect_server_ip4 || true)}"
+SERVER_IP6="${SERVER_IP6:-$(detect_server_ip6 || true)}"
+if [[ -z "${SERVER_IP:-}" && -z "${SERVER_IP6:-}" ]]; then
+  log "ERROR: cannot determine SERVER_IP/SERVER_IP6 (set one manually in $ENV_FILE)"
   exit 1
 fi
 
@@ -92,20 +103,28 @@ ensure_class_htb() {
 
 # purge any existing fw-filters for this handle (they can accumulate if earlier versions used varying pref)
 purge_fw_filters_by_handle() {
-  local dev="$1" parent="$2" handle="$3"
+  local dev="$1" parent="$2" handle="$3" l3_proto="${4:-}"
   # tc output contains lines like: "filter protocol ip pref 41980 fw ... handle 0x27cd ..."
   tc filter show dev "$dev" parent "$parent" 2>/dev/null \
-    | awk -v h="$handle" '$0 ~ /filter protocol ip pref/ {pref=$5} $0 ~ ("handle " h) {print pref}' \
-    | while read -r pref; do
-        [[ -n "$pref" ]] || continue
-        tc filter del dev "$dev" parent "$parent" protocol ip pref "$pref" 2>/dev/null || true
+    | awk -v h="$handle" -v p="$l3_proto" '
+        $1=="filter" && $2=="protocol" {
+          proto=$3; pref=""
+          for(i=1;i<=NF;i++) if($i=="pref"){pref=$(i+1)}
+        }
+        $0 ~ ("handle " h) {
+          if (proto != "" && pref != "" && (p == "" || proto == p)) print proto "\t" pref
+        }
+      ' \
+    | while IFS=$'\t' read -r proto pref; do
+        [[ -n "$proto" && -n "$pref" ]] || continue
+        tc filter del dev "$dev" parent "$parent" protocol "$proto" pref "$pref" 2>/dev/null || true
       done
 }
 
 ensure_fw_filter() {
-  local dev="$1" parent="$2" handle="$3" flowid="$4" pref="$5"
-  purge_fw_filters_by_handle "$dev" "$parent" "$handle"
-  run "tc filter add dev $dev parent $parent protocol ip pref $pref handle $handle fw flowid $flowid"
+  local dev="$1" parent="$2" handle="$3" flowid="$4" pref="$5" l3_proto="$6"
+  purge_fw_filters_by_handle "$dev" "$parent" "$handle" "$l3_proto"
+  run "tc filter add dev $dev parent $parent protocol $l3_proto pref $pref handle $handle fw flowid $flowid"
 }
 
 ensure_tc_for_mark() {
@@ -122,26 +141,41 @@ ensure_tc_for_mark() {
 
   log "  [UL] ensure class $ul_class on $IFB_DEV rate=$ul_rate"
   ensure_class_htb "$IFB_DEV" "2:1" "$ul_class" "$ul_rate"
-  log "  [UL] ensure fw filter handle=$handle -> $ul_class on $IFB_DEV"
-  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref"
+  log "  [UL] ensure fw filter handle=$handle -> $ul_class on $IFB_DEV (ip + ipv6)"
+  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref" "ip"
+  ensure_fw_filter "$IFB_DEV" "2:" "$handle" "$ul_class" "$pref" "ipv6"
 
   log "  [DL] ensure class $dl_class on $WAN_DEV rate=$dl_rate"
   ensure_class_htb "$WAN_DEV" "1:1" "$dl_class" "$dl_rate"
-  log "  [DL] ensure fw filter handle=$handle -> $dl_class on $WAN_DEV"
-  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref"
+  log "  [DL] ensure fw filter handle=$handle -> $dl_class on $WAN_DEV (ip + ipv6)"
+  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref" "ip"
+  ensure_fw_filter "$WAN_DEV" "1:" "$handle" "$dl_class" "$pref" "ipv6"
 }
 
 update_conntrack_mark() {
   local proto="$1" ip="$2" port="$3" mark_dec="$4"
+  local family server_ip
+  if [[ "$ip" == *:* ]]; then
+    family="ipv6"
+    server_ip="${SERVER_IP6:-}"
+  else
+    family="ipv4"
+    server_ip="${SERVER_IP:-}"
+  fi
+
+  if [[ -z "$server_ip" ]]; then
+    log "  [CT] skip: missing server IP for family=$family (set SERVER_IP/SERVER_IP6)"
+    return 0
+  fi
 
   local cmd
-  cmd="conntrack -U -p ${proto} --orig-src ${ip} --orig-dst ${SERVER_IP} --orig-port-src ${port} --orig-port-dst ${VPN_PORT} --mark ${mark_dec}"
+  cmd="conntrack -U -f ${family} -p ${proto} --orig-src ${ip} --orig-dst ${server_ip} --orig-port-src ${port} --orig-port-dst ${VPN_PORT} --mark ${mark_dec}"
 
   log "  [CT] $cmd"
   run "$cmd" || true
 
   if [[ "$DRY_RUN" == "0" ]]; then
-    conntrack -L -p "$proto" 2>/dev/null \
+    conntrack -L -f "$family" -p "$proto" 2>/dev/null \
       | grep -F "src=${ip} " \
       | grep -F "sport=${port} " \
       | grep -F "dport=${VPN_PORT} " \
@@ -150,7 +184,7 @@ update_conntrack_mark() {
   fi
 }
 
-log "start: container=$CONTAINER log=$XRAY_LOG WAN_DEV=$WAN_DEV IFB_DEV=$IFB_DEV SERVER_IP=$SERVER_IP VPN_PORT=$VPN_PORT"
+log "start: container=$CONTAINER log=$XRAY_LOG WAN_DEV=$WAN_DEV IFB_DEV=$IFB_DEV SERVER_IP=$SERVER_IP SERVER_IP6=${SERVER_IP6:-n/a} VPN_PORT=$VPN_PORT"
 
 # wait until bootstrap is ready (important on boot / restarts)
 until ensure_bootstrap_ready; do
@@ -175,18 +209,39 @@ stream_xray_log() {
 
 stream_xray_log \
 | while IFS= read -r line; do
+    ip=""
+    port=""
+    proto=""
+    email=""
+
     [[ "$line" == *" accepted "* && "$line" == *" email:"* && "$line" == *" from "* ]] || continue
 
-    if [[ "$line" =~ from[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)[[:space:]].*accepted[[:space:]](tcp|udp):.*email:[[:space:]]([^[:space:]]+) ]]; then
+    if [[ "$line" =~ from[[:space:]]\[([0-9A-Fa-f:]+)\]:([0-9]+)[[:space:]].*accepted[[:space:]](tcp|udp):.*email:[[:space:]]([^[:space:]]+) ]]; then
       ip="${BASH_REMATCH[1]}"
       port="${BASH_REMATCH[2]}"
       proto="${BASH_REMATCH[3]}"
       email="${BASH_REMATCH[4]}"
+    elif [[ "$line" =~ from[[:space:]]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)[[:space:]].*accepted[[:space:]](tcp|udp):.*email:[[:space:]]([^[:space:]]+) ]]; then
+      ip="${BASH_REMATCH[1]}"
+      port="${BASH_REMATCH[2]}"
+      proto="${BASH_REMATCH[3]}"
+      email="${BASH_REMATCH[4]}"
+    elif [[ "$line" =~ from[[:space:]]([0-9A-Fa-f:]+):([0-9]+)[[:space:]].*accepted[[:space:]](tcp|udp):.*email:[[:space:]]([^[:space:]]+) ]]; then
+      ip="${BASH_REMATCH[1]}"
+      port="${BASH_REMATCH[2]}"
+      proto="${BASH_REMATCH[3]}"
+      email="${BASH_REMATCH[4]}"
+    fi
 
+    if [[ -n "$ip" && -n "$port" && -n "$proto" && -n "$email" ]]; then
       read -r ul dl < <(get_rates_for_email "$email")
       mark="$(email_to_mark "$email")"
 
-      log "event: proto=$proto email=$email ip=$ip:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
+      if [[ "$ip" == *:* ]]; then
+        log "event: proto=$proto email=$email ip=[$ip]:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
+      else
+        log "event: proto=$proto email=$email ip=$ip:$port mark=$(printf '0x%x' "$mark") ul=$ul dl=$dl"
+      fi
       ensure_tc_for_mark "$mark" "$ul" "$dl"
       update_conntrack_mark "$proto" "$ip" "$port" "$mark"
     fi

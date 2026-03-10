@@ -68,6 +68,11 @@ tc filter add dev "$WAN_DEV" parent ffff: protocol ip pref 10 u32 \
   action ctinfo cpmark \
   action mirred egress redirect dev "$IFB_DEV"
 
+tc filter add dev "$WAN_DEV" parent ffff: protocol ipv6 pref 11 u32 \
+  match u32 0 0 \
+  action ctinfo cpmark \
+  action mirred egress redirect dev "$IFB_DEV"
+
 # ----------------------------
 # HTB base: RECREATE (needed to apply r2q reliably)
 # ----------------------------
