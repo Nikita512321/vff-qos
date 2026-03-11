@@ -28,8 +28,8 @@ qos_upload_default: "50mbit"
 qos_download_default: "80mbit"
 
 qos_wan_ceil: "1gbit"
-qos_tc_default_ul: "1gbit"
-qos_tc_default_dl: "1gbit"
+qos_tc_default_ul: "30mbit"
+qos_tc_default_dl: "30mbit"
 
 # Server-side port that Xray accepts on (outer port)
 qos_vpn_port: "443"
